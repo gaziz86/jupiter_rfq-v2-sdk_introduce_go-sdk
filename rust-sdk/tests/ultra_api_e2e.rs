@@ -99,7 +99,7 @@ async fn fetch_order(
          excludeDexes=&\
          excludeRouters=jupiterz&\
          taker={taker}&\
-         enableRfqV2=true",
+         clientPlatform=jupiter.web.home_page",
     );
     println!("  GET {url}");
 
