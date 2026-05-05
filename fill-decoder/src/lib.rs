@@ -367,7 +367,10 @@ mod tests {
         assert!(report.is_exclusive(), "fill_authority: {}", report);
 
         // Convenience: check all at once.
-        assert!(all_exclusive(msg, &[maker_base, maker_quote, fill_authority]));
+        assert!(all_exclusive(
+            msg,
+            &[maker_base, maker_quote, fill_authority]
+        ));
     }
 
     #[test]

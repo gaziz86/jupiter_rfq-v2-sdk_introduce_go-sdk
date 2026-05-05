@@ -192,9 +192,8 @@ fn tx_to_json(
     });
 
     if !exclusivity.is_empty() {
-        root["exclusivity"] = serde_json::Value::Array(
-            exclusivity.iter().map(exclusivity_to_json).collect(),
-        );
+        root["exclusivity"] =
+            serde_json::Value::Array(exclusivity.iter().map(exclusivity_to_json).collect());
     }
 
     root

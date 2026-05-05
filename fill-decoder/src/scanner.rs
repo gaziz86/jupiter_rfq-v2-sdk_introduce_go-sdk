@@ -26,8 +26,7 @@ pub fn scan_for_embedded_fill(data: &[u8]) -> Option<(FillExactInInstruction, Fi
 
     // Scan for u32 values that could be a levels-vector length.
     for pos in 16..data.len().saturating_sub(20) {
-        let num_levels =
-            u32::from_le_bytes(data[pos..pos + 4].try_into().ok()?) as usize;
+        let num_levels = u32::from_le_bytes(data[pos..pos + 4].try_into().ok()?) as usize;
         if num_levels == 0 || num_levels > 20 {
             continue;
         }
