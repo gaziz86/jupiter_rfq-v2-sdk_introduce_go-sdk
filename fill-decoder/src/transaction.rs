@@ -355,8 +355,7 @@ fn parse_message(data: &[u8], offset: &mut usize) -> crate::Result<DecodedMessag
                     .and_then(|ix| analyze_fill(&ix).ok().map(|a| (ix, a)))
             } else {
                 // Try IDL-based aggregator decoding first, then heuristic scan.
-                decode_jupiter_rfq_fill(&raw.data)
-                    .or_else(|| scan_for_embedded_fill(&raw.data))
+                decode_jupiter_rfq_fill(&raw.data).or_else(|| scan_for_embedded_fill(&raw.data))
             };
 
             let accounts: Vec<ResolvedAccount> = raw

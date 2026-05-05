@@ -25,7 +25,10 @@ pub use analysis::analyze_fill;
 
 pub use scanner::scan_for_embedded_fill;
 
-pub use aggregator::{decode_jupiter_rfq_fill, is_jupiter_route, AGGREGATOR_IDL_JSON, JUPITER_PROGRAM_ID};
+pub use aggregator::{
+    decode_jupiter_rfq_fill, decode_jupiter_rfq_step_indices, JupiterRfqStepInfo,
+    AGGREGATOR_IDL_JSON, JUPITER_PROGRAM_ID,
+};
 
 /// The Anchor IDL for the RFQ v2 program, embedded at compile time.
 pub const IDL_JSON: &str = include_str!("../idls/rfq_v2.json");
@@ -364,7 +367,10 @@ mod tests {
         assert!(report.is_exclusive(), "fill_authority: {}", report);
 
         // Convenience: check all at once.
-        assert!(all_exclusive(msg, &[maker_base, maker_quote, fill_authority]));
+        assert!(all_exclusive(
+            msg,
+            &[maker_base, maker_quote, fill_authority]
+        ));
     }
 
     #[test]
