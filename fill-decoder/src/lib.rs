@@ -6,6 +6,7 @@ pub mod aggregator;
 pub mod analysis;
 pub mod decode;
 pub mod error;
+pub mod lookups;
 pub mod scanner;
 pub mod transaction;
 pub mod types;
@@ -13,7 +14,7 @@ pub mod validation;
 pub use error::{FillDecoderError, Result};
 
 pub use types::{
-    FillAccounts, FillAnalysis, FillExactInInstruction, FillExactInParams, Level, Side,
+    FillAccounts, FillAnalysis, FillExactInInstruction, FillExactInParams, FillMints, Level, Side,
 };
 
 pub use decode::{
@@ -26,8 +27,8 @@ pub use analysis::analyze_fill;
 pub use scanner::scan_for_embedded_fill;
 
 pub use aggregator::{
-    decode_jupiter_rfq_fill, decode_jupiter_rfq_step_indices, JupiterRfqStepInfo,
-    AGGREGATOR_IDL_JSON, JUPITER_PROGRAM_ID,
+    decode_jupiter_rfq_fill, decode_jupiter_rfq_step_indices, route_mint_positions,
+    JupiterRfqStepInfo, AGGREGATOR_IDL_JSON, JUPITER_PROGRAM_ID,
 };
 
 /// The Anchor IDL for the RFQ v2 program, embedded at compile time.
@@ -42,6 +43,8 @@ pub use transaction::{
 pub use validation::{
     all_exclusive, check_fill_exclusivity, check_fill_exclusivity_multi, ExclusivityReport,
 };
+
+pub use lookups::{parse_lookup_table_addresses, resolve_address_lookups, LookupTableMap};
 
 #[cfg(test)]
 mod tests {
@@ -396,6 +399,151 @@ mod tests {
         let report = check_fill_exclusivity(msg, user);
         // The user shows up in the Jupiter fill instruction (ix 2) only.
         assert!(report.is_exclusive(), "user: {}", report);
+    }
+
+    // ---- FillMints tests ----
+
+    #[test]
+    fn test_fill_mints_from_base_quote_bid() {
+        // Bid: taker pays quote, receives base
+        let m = FillMints::from_base_quote("BASE".into(), "QUOTE".into(), Side::Bid);
+        assert_eq!(m.input_mint, "QUOTE");
+        assert_eq!(m.output_mint, "BASE");
+        assert_eq!(m.base_mint, "BASE");
+        assert_eq!(m.quote_mint, "QUOTE");
+    }
+
+    #[test]
+    fn test_fill_mints_from_base_quote_ask() {
+        // Ask: taker pays base, receives quote
+        let m = FillMints::from_base_quote("BASE".into(), "QUOTE".into(), Side::Ask);
+        assert_eq!(m.input_mint, "BASE");
+        assert_eq!(m.output_mint, "QUOTE");
+        assert_eq!(m.base_mint, "BASE");
+        assert_eq!(m.quote_mint, "QUOTE");
+    }
+
+    #[test]
+    fn test_fill_mints_from_input_output_bid() {
+        // Bid: input=quote, output=base → derive base/quote
+        let m = FillMints::from_input_output("QUOTE".into(), "BASE".into(), Side::Bid);
+        assert_eq!(m.base_mint, "BASE");
+        assert_eq!(m.quote_mint, "QUOTE");
+    }
+
+    #[test]
+    fn test_fill_mints_from_input_output_ask() {
+        // Ask: input=base, output=quote → derive base/quote
+        let m = FillMints::from_input_output("BASE".into(), "QUOTE".into(), Side::Ask);
+        assert_eq!(m.base_mint, "BASE");
+        assert_eq!(m.quote_mint, "QUOTE");
+    }
+
+    #[test]
+    fn test_fill_mints_embedded_real_tx_2() {
+        // REAL_TX2: route_v2 single-step, Ask, taker sells A3QA for USDC.
+        // Mints are read directly from the embedded fill_exact_in account
+        // block (positions 6 and 7), not from the route's source/destination.
+        let tx = decode_transaction_base64(REAL_TX2_BASE64).unwrap();
+        let fill_ix = tx
+            .message
+            .instructions
+            .iter()
+            .find(|ix| ix.fill.is_some())
+            .expect("should find fill");
+
+        let mints = fill_ix.fill_mints.as_ref().expect("fill_mints populated");
+
+        // Base = A3QA (static key); quote (USDC) sits in the ALT and surfaces
+        // as a placeholder pre-RPC-resolution.
+        assert_eq!(
+            mints.base_mint,
+            "A3QAoKnf3jFcCfTGvEpE7KVBMZqXQJwvwt6Uc4UExkDp"
+        );
+        assert!(
+            mints.quote_mint.starts_with("LookupReadonly["),
+            "expected lookup placeholder, got {}",
+            mints.quote_mint
+        );
+        // taker_side=Ask → input = base, output = quote
+        assert_eq!(mints.input_mint, mints.base_mint);
+        assert_eq!(mints.output_mint, mints.quote_mint);
+    }
+
+    #[test]
+    fn test_fill_mints_embedded_real_tx_1() {
+        // REAL_TX1 is a 3-leg parallel split. The instructions sysvar lives in
+        // an ALT here, exercising the lookup-placeholder branch of the block
+        // validator.
+        let tx = decode_transaction_base64(REAL_TX_BASE64).unwrap();
+        let fill_ix = tx
+            .message
+            .instructions
+            .iter()
+            .find(|ix| ix.fill.is_some())
+            .expect("should find fill");
+        assert!(fill_ix.fill_mints.is_some());
+    }
+
+    /// USDT → USDC fill embedded as the first leg of a 2-step Jupiter route
+    /// (USDT → USDC → SOL). The route's destination_mint is wSOL but the
+    /// RFQ leg's actual base_mint is USDC — verifies the resolver reads
+    /// from the embedded fill block, not the route's source/dest.
+    const REAL_TX3_BASE64: &str = "AhcA6+ZC1kWvFdDjlDTqW2dIcjvtninQs4TPOCM8AYtjf9P+8Jxj6ljR3Zvlt3d61kPMcorJZ/7C6WEIHZGJ0AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAgAIBBg0CiOE7jnRYBkI7XU7ZH3QKA/aGNdP+1qa0dVADNmPABsOAvIYcfaKJKbntsRZhkmE5z6xpVI3UbVOSlAkYpnljM9OKLuF/OLQ/lmpeTEGZEe43VqDC0mQoim65HePWwfRQzh2vMinR51RMtSBehc2T2HaUHHRVhiAQUKpftXyPLHuLntEEYI0LF0BkR8R+qu33k4W2mmtaihzBna5tNajvwv+YF9CXF3oPUYQ0JkGwRP3YyqgVzK9NAQ3Wwl0Mu93o2uD9m/1rpADKOjC3fE4vE5OOe1sMPA4ZuYhhVxvpFoyXJY9OJInxuz0QKRSODYMLWhOZ2v8QhASOe9jb6fhZAwZGb+UhFzL/7K26csOb57yM5bvF9xJrLEObOkAAAADOAQ5gr+2yJxe9YxkvVBRaP5ZaM7uC0scCnrLOHiCCZAnk1I8BnjipjWjfEIVY5ELgMj6qznalm0dryLHTf7MuBHnVW/IxwG7udMVuzmgVB/2xst6j9I5RArHNola8E48G3fbh12Whk9nL4UbO63msHLSF7V9bN5E6jPWFfv8AqTga1+fLePEE5rAEWLsmL0x75DCVIsTabIoie7gTRhGKBggABQIYEgMACAAJA+NnBgAAAAAACwUGABUMEQmT8Xtk9ISudv4HBgADABMRDAEBCyUAAgYJFQwMCxILDQoAAQMCBAUTCQwMFxgWEAAODwYDFRMMDBcUXrtk+swxxK8UmJKYAAAAAADnua8GAAAAABYAAgAAAAIAAAB4ACwAAAAOwftpAAAAAAEAAAAAAAAAQEIPAAAAAAABAAAAcEEPAAAAAAAKAAAAAAAAABAnAAFZABAnAQIMAwYAAAEJAim/lQcqT78E33F1k+c4vMwhJygVwkcagNn59VWw1IQlAScFEwAoARd5QE4t+Dvx0UlyGT++v3V9s/1gQI0crEMfwbwNXZBmFgPfF9sDFuHc";
+
+    #[test]
+    fn test_fill_mints_embedded_multi_step_route() {
+        // 2-step sequential route, USDT → USDC → SOL. RFQ is leg 1 (USDT→USDC).
+        // Pre-RPC: USDT is a static key, USDC is in an ALT.
+        let tx = decode_transaction_base64(REAL_TX3_BASE64).unwrap();
+        let fill_ix = tx
+            .message
+            .instructions
+            .iter()
+            .find(|ix| ix.fill.is_some())
+            .expect("should find fill");
+
+        let mints = fill_ix.fill_mints.as_ref().expect("fill_mints populated");
+
+        // USDT (Tether) is a static account key in this tx.
+        assert_eq!(
+            mints.quote_mint,
+            "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB"
+        );
+        // USDC lives in the ALT — placeholder until RPC resolution.
+        assert!(
+            mints.base_mint.starts_with("LookupReadonly["),
+            "expected lookup placeholder for USDC base_mint, got {}",
+            mints.base_mint
+        );
+        // taker_side=Bid → input = quote (USDT), output = base (USDC)
+        assert_eq!(mints.input_mint, mints.quote_mint);
+        assert_eq!(mints.output_mint, mints.base_mint);
+    }
+
+    #[test]
+    fn test_embedded_fill_accounts_are_labeled() {
+        // Verify the 11 fill_exact_in accounts get labeled inside the parent
+        // (Jupiter route) instruction.
+        let tx = decode_transaction_base64(REAL_TX2_BASE64).unwrap();
+        let fill_ix = tx
+            .message
+            .instructions
+            .iter()
+            .find(|ix| ix.fill.is_some())
+            .expect("should find fill");
+
+        let labels: Vec<&str> = fill_ix
+            .accounts
+            .iter()
+            .filter_map(|a| a.label.as_deref())
+            .collect();
+        assert_eq!(labels.len(), FILL_EXACT_IN_ACCOUNT_COUNT);
+        assert_eq!(labels[0], "user");
+        assert_eq!(labels[1], "fill_authority");
+        assert_eq!(labels[6], "base_mint");
+        assert_eq!(labels[7], "quote_mint");
+        assert_eq!(labels[10], "instructions_sysvar");
     }
 
     #[test]

@@ -3,11 +3,15 @@
 use crate::aggregator::decode_jupiter_rfq_fill;
 use crate::analysis::analyze_fill;
 use crate::decode::{
-    decode_fill_instruction, is_fill_exact_in, read_u8, FILL_ACCOUNT_LABELS, RFQ_V2_PROGRAM_ID,
+    decode_fill_instruction, is_fill_exact_in, read_u8, FILL_ACCOUNT_LABELS,
+    FILL_EXACT_IN_ACCOUNT_COUNT, RFQ_V2_PROGRAM_ID,
 };
 use crate::error::FillDecoderError;
 use crate::scanner::scan_for_embedded_fill;
-use crate::types::{FillAnalysis, FillExactInInstruction};
+use crate::types::{FillAnalysis, FillExactInInstruction, FillMints, Side};
+
+/// Solana sysvar pubkey: `Sysvar1nstructions1111111111111111111111111`.
+const INSTRUCTIONS_SYSVAR_PUBKEY: &str = "Sysvar1nstructions1111111111111111111111111";
 
 /// Solana message version.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -66,6 +70,8 @@ pub struct DecodedInstruction {
     pub data: Vec<u8>,
     /// Decoded fill + sweep analysis (present only for `fill_exact_in`).
     pub fill: Option<(FillExactInInstruction, FillAnalysis)>,
+    /// Mints involved in the fill, when resolvable from the static account list
+    pub fill_mints: Option<FillMints>,
 }
 
 /// An address-table lookup entry (V0 messages only).
@@ -101,6 +107,65 @@ pub struct DecodedTransaction {
     pub signatures: Vec<String>,
     /// The decoded message.
     pub message: DecodedMessage,
+}
+
+/// Find the start position of the 11-account `fill_exact_in` block within a
+/// Jupiter route instruction's account list.
+///
+/// Anchored on the RFQ v2 program ID (which Jupiter's CPI dispatch passes as
+/// the entry preceding each step's accounts), then validated against the
+/// expected `fill_exact_in` signature shape:
+///   - position 0 (`user`) must be a writable signer,
+///   - position 1 (`fill_authority`) must be a signer,
+///   - position 10 (`instructions_sysvar`) must be the sysvar pubkey **OR** a
+///     lookup-table placeholder (since the sysvar may live in an ALT).
+fn find_embedded_fill_block<F>(account_indices: &[u8], resolve: &F) -> Option<usize>
+where
+    F: Fn(u8) -> ResolvedAccount,
+{
+    for (pos, &idx) in account_indices.iter().enumerate() {
+        if resolve(idx).pubkey != RFQ_V2_PROGRAM_ID {
+            continue;
+        }
+        let block_start = pos + 1;
+        if block_start + FILL_EXACT_IN_ACCOUNT_COUNT > account_indices.len() {
+            continue;
+        }
+        let user = resolve(account_indices[block_start]);
+        let fill_authority = resolve(account_indices[block_start + 1]);
+        if !user.is_signer || !user.is_writable || !fill_authority.is_signer {
+            continue;
+        }
+        let sysvar = resolve(account_indices[block_start + 10]);
+        let is_sysvar_or_lookup = sysvar.pubkey == INSTRUCTIONS_SYSVAR_PUBKEY
+            || sysvar.pubkey.starts_with("LookupReadonly[");
+        if !is_sysvar_or_lookup {
+            continue;
+        }
+        return Some(block_start);
+    }
+    None
+}
+
+/// Read base_mint / quote_mint from a labeled fill account block (positions 6
+/// and 7 in the standard `fill_exact_in` layout) and combine with the taker's
+/// side to produce a full `FillMints`.
+fn resolve_fill_mints_from_block<F>(
+    account_indices: &[u8],
+    resolve: &F,
+    block_start: usize,
+    taker_side: Side,
+) -> Option<FillMints>
+where
+    F: Fn(u8) -> ResolvedAccount,
+{
+    let base_idx = *account_indices.get(block_start + 6)?;
+    let quote_idx = *account_indices.get(block_start + 7)?;
+    Some(FillMints::from_base_quote(
+        resolve(base_idx).pubkey,
+        resolve(quote_idx).pubkey,
+        taker_side,
+    ))
 }
 
 /// Read Solana's compact-u16 variable-length encoding.
@@ -358,15 +423,44 @@ fn parse_message(data: &[u8], offset: &mut usize) -> crate::Result<DecodedMessag
                 decode_jupiter_rfq_fill(&raw.data).or_else(|| scan_for_embedded_fill(&raw.data))
             };
 
+            // For embedded fills, locate the 11-account fill_exact_in block
+            // inside the parent (e.g. Jupiter route) instruction's accounts so
+            // we can both read mints from it and label its accounts.
+            let embedded_block_start = if fill.is_some() && !(is_direct_fill && is_rfq_program) {
+                find_embedded_fill_block(&raw.account_indices, &resolve)
+            } else {
+                None
+            };
+
+            let fill_mints = fill.as_ref().and_then(|(fill_ix, _)| {
+                let block_start = if is_direct_fill && is_rfq_program {
+                    Some(0)
+                } else {
+                    embedded_block_start
+                };
+                resolve_fill_mints_from_block(
+                    &raw.account_indices,
+                    &resolve,
+                    block_start?,
+                    fill_ix.taker_side,
+                )
+            });
+
             let accounts: Vec<ResolvedAccount> = raw
                 .account_indices
                 .iter()
                 .enumerate()
                 .map(|(pos, &idx)| {
                     let mut acct = resolve(idx);
-                    // Label accounts for direct fill instructions
+                    // Direct fill: standard 11-account layout starts at position 0.
                     if is_direct_fill && is_rfq_program && pos < FILL_ACCOUNT_LABELS.len() {
                         acct.label = Some(FILL_ACCOUNT_LABELS[pos].to_string());
+                    }
+                    // Embedded fill: 11-account block starts at embedded_block_start.
+                    if let Some(start) = embedded_block_start {
+                        if pos >= start && pos < start + FILL_EXACT_IN_ACCOUNT_COUNT {
+                            acct.label = Some(FILL_ACCOUNT_LABELS[pos - start].to_string());
+                        }
                     }
                     acct
                 })
@@ -380,6 +474,7 @@ fn parse_message(data: &[u8], offset: &mut usize) -> crate::Result<DecodedMessag
                 accounts,
                 data: raw.data,
                 fill,
+                fill_mints,
             }
         })
         .collect();
@@ -530,6 +625,13 @@ impl std::fmt::Display for DecodedInstruction {
                     "      #{}: px_ticks={}, qty_lots={}",
                     i, lvl.px_ticks, lvl.qty_lots,
                 )?;
+            }
+            if let Some(mints) = &self.fill_mints {
+                writeln!(f, "    --- Fill Mints ---")?;
+                writeln!(f, "    Input mint:      {}", mints.input_mint)?;
+                writeln!(f, "    Output mint:     {}", mints.output_mint)?;
+                writeln!(f, "    Base mint:       {}", mints.base_mint)?;
+                writeln!(f, "    Quote mint:      {}", mints.quote_mint)?;
             }
             writeln!(f, "    --- Sweep Analysis ---")?;
             writeln!(

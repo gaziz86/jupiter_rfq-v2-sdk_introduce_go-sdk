@@ -2,6 +2,8 @@
 
 Decoder and analysis utilities for RFQ v2 `fill_exact_in` transactions on Solana.
 
+Each decoded instruction exposes a `fill_mints` field with the resolved input, output, base, and quote mints, plus labels on all 11 `fill_exact_in` accounts — works for both direct fills and embedded fills inside any Jupiter route variant, including multi-step routes where the RFQ is one leg among many. Mints sitting in address-table lookups appear as `LookupReadonly[N]` placeholders unless an RPC URL is provided to fetch the lookup tables.
+
 ## Building the CLI
 
 The `decode-tx` binary requires the `cli` feature:

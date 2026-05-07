@@ -124,3 +124,56 @@ impl std::fmt::Display for FillAnalysis {
         )
     }
 }
+
+/// Mints involved in a fill, resolved from the transaction's account list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FillMints {
+    /// Token the taker sent in.
+    pub input_mint: String,
+    /// Token the taker received.
+    pub output_mint: String,
+    /// Maker's base mint.
+    pub base_mint: String,
+    /// Maker's quote mint.
+    pub quote_mint: String,
+}
+
+impl FillMints {
+    /// Build from the maker's base/quote mints and the taker's side.
+    pub fn from_base_quote(base_mint: String, quote_mint: String, taker_side: Side) -> Self {
+        let (input_mint, output_mint) = match taker_side {
+            Side::Bid => (quote_mint.clone(), base_mint.clone()),
+            Side::Ask => (base_mint.clone(), quote_mint.clone()),
+        };
+        Self {
+            input_mint,
+            output_mint,
+            base_mint,
+            quote_mint,
+        }
+    }
+
+    /// Build from the route's input/output mints and the taker's side.
+    pub fn from_input_output(input_mint: String, output_mint: String, taker_side: Side) -> Self {
+        let (base_mint, quote_mint) = match taker_side {
+            Side::Bid => (output_mint.clone(), input_mint.clone()),
+            Side::Ask => (input_mint.clone(), output_mint.clone()),
+        };
+        Self {
+            input_mint,
+            output_mint,
+            base_mint,
+            quote_mint,
+        }
+    }
+}
+
+impl std::fmt::Display for FillMints {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "FillMints {{ input: {}, output: {}, base: {}, quote: {} }}",
+            self.input_mint, self.output_mint, self.base_mint, self.quote_mint,
+        )
+    }
+}
