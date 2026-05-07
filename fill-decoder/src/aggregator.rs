@@ -478,6 +478,53 @@ pub struct JupiterRfqStepInfo {
     pub total_steps: Option<u32>,
 }
 
+/// Position of `(source_mint, destination_mint)` within a Jupiter route
+/// instruction's account list, for variants where those mints sit at
+/// fixed positions (no preceding optional accounts).
+pub fn route_mint_positions(disc: &[u8; 8]) -> Option<(usize, usize)> {
+    match *disc {
+        // route_v2 layout:
+        //   0 user_transfer_authority
+        //   1 user_source_token_account
+        //   2 user_destination_token_account
+        //   3 source_mint        ←
+        //   4 destination_mint   ←
+        //   5 source_token_program
+        //   6 destination_token_program
+        //   7 destination_token_account (optional, trailing)
+        //   8 event_authority
+        //   9 program
+        ROUTE_V2 | EXACT_OUT_ROUTE_V2 => Some((3, 4)),
+        // shared_accounts_route v1 layout:
+        //   0 token_program
+        //   1 program_authority
+        //   2 user_transfer_authority
+        //   3 source_token_account
+        //   4 program_source_token_account
+        //   5 program_destination_token_account
+        //   6 destination_token_account
+        //   7 source_mint        ←
+        //   8 destination_mint   ←
+        //   9 platform_fee_account (optional, trailing)
+        //   ...
+        SHARED_ACCOUNTS_ROUTE
+        | SHARED_ACCOUNTS_EXACT_OUT_ROUTE
+        | SHARED_ACCOUNTS_ROUTE_WITH_TOKEN_LEDGER => Some((7, 8)),
+        // shared_accounts_route_v2 layout:
+        //   0 program_authority
+        //   1 user_transfer_authority
+        //   2 source_token_account
+        //   3 program_source_token_account
+        //   4 program_destination_token_account
+        //   5 destination_token_account
+        //   6 source_mint        ←
+        //   7 destination_mint   ←
+        //   ...
+        SHARED_ACCOUNTS_ROUTE_V2 | SHARED_ACCOUNTS_EXACT_OUT_ROUTE_V2 => Some((6, 7)),
+        _ => None,
+    }
+}
+
 pub fn decode_jupiter_rfq_fill(data: &[u8]) -> Option<(FillExactInInstruction, FillAnalysis)> {
     let (steps, in_amount, _) = parse_route_steps(data)?;
     steps

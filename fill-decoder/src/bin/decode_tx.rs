@@ -51,8 +51,8 @@ mod rpc {
     }
 
     #[derive(Deserialize)]
-    pub struct Response {
-        pub result: Option<TransactionResult>,
+    pub struct Response<T> {
+        pub result: Option<T>,
         pub error: Option<RpcError>,
     }
 
@@ -66,6 +66,17 @@ mod rpc {
     pub struct TransactionResult {
         /// `[data, encoding]` – we request `"base64"`.
         pub transaction: (String, String),
+    }
+
+    #[derive(Deserialize)]
+    pub struct AccountsResult {
+        pub value: Vec<Option<AccountInfo>>,
+    }
+
+    #[derive(Deserialize)]
+    pub struct AccountInfo {
+        /// `[data, encoding]` – we request `"base64"`.
+        pub data: (String, String),
     }
 }
 
@@ -97,7 +108,7 @@ async fn fetch_transaction_base64(rpc_url: &str, signature: &str) -> Result<Stri
         return Err(format!("RPC returned HTTP {}", resp.status()));
     }
 
-    let rpc_resp: rpc::Response = resp
+    let rpc_resp: rpc::Response<rpc::TransactionResult> = resp
         .json()
         .await
         .map_err(|e| format!("Failed to parse RPC response: {e}"))?;
@@ -111,6 +122,71 @@ async fn fetch_transaction_base64(rpc_url: &str, signature: &str) -> Result<Stri
         .ok_or_else(|| "RPC returned null result – transaction not found".to_string())?;
 
     Ok(result.transaction.0)
+}
+
+/// Fetch the address-lookup-table account data for each of the given addresses
+/// and parse them into pubkey lists.
+async fn fetch_lookup_tables(
+    rpc_url: &str,
+    addresses: &[String],
+) -> Result<fill_decoder::LookupTableMap, String> {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+
+    if addresses.is_empty() {
+        return Ok(fill_decoder::LookupTableMap::new());
+    }
+
+    let client = reqwest::Client::new();
+    let body = rpc::Request {
+        jsonrpc: "2.0",
+        id: 1,
+        method: "getMultipleAccounts",
+        params: serde_json::json!([addresses, { "encoding": "base64" }]),
+    };
+
+    let resp = client
+        .post(rpc_url)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("HTTP request failed: {e}"))?;
+
+    if !resp.status().is_success() {
+        return Err(format!("RPC returned HTTP {}", resp.status()));
+    }
+
+    let rpc_resp: rpc::Response<rpc::AccountsResult> = resp
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse RPC response: {e}"))?;
+
+    if let Some(err) = rpc_resp.error {
+        return Err(format!("RPC error ({}): {}", err.code, err.message));
+    }
+    let result = rpc_resp
+        .result
+        .ok_or_else(|| "RPC returned null result for getMultipleAccounts".to_string())?;
+
+    let mut map = fill_decoder::LookupTableMap::new();
+    for (addr, info) in addresses.iter().zip(result.value.into_iter()) {
+        let Some(info) = info else { continue };
+        let raw = match STANDARD.decode(&info.data.0) {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("warning: failed to base64-decode lookup table {addr}: {e}");
+                continue;
+            }
+        };
+        match fill_decoder::parse_lookup_table_addresses(&raw) {
+            Ok(addrs) => {
+                map.insert(addr.clone(), addrs);
+            }
+            Err(e) => {
+                eprintln!("warning: failed to parse lookup table {addr}: {e}");
+            }
+        }
+    }
+    Ok(map)
 }
 
 // The lib types intentionally don't pull in serde, so we build JSON manually.
@@ -175,12 +251,21 @@ fn tx_to_json(
                     m
                 })
                 .collect();
-            Some(serde_json::json!({
+            let mut entry = serde_json::json!({
                 "instruction_index": ix.instruction_index,
                 "program_id": ix.program_id,
                 "accounts": accounts,
                 "fill": fill_to_json(fill_ix, analysis),
-            }))
+            });
+            if let Some(mints) = &ix.fill_mints {
+                entry["mints"] = serde_json::json!({
+                    "input_mint": mints.input_mint,
+                    "output_mint": mints.output_mint,
+                    "base_mint": mints.base_mint,
+                    "quote_mint": mints.quote_mint,
+                });
+            }
+            Some(entry)
         })
         .collect();
 
@@ -206,12 +291,12 @@ async fn main() {
     let b64 = if let Some(b64) = cli.base64.or(cli.message_hash) {
         b64
     } else if let Some(sig) = cli.tx {
-        let rpc_url = cli.rpc_url.unwrap_or_else(|| {
+        let rpc_url = cli.rpc_url.as_deref().unwrap_or_else(|| {
             eprintln!("Error: --tx requires an RPC URL. Set RPC_URL env var or pass --rpc-url");
             std::process::exit(1);
         });
         eprintln!("Fetching tx {} from {} …", sig, rpc_url);
-        match fetch_transaction_base64(&rpc_url, &sig).await {
+        match fetch_transaction_base64(rpc_url, &sig).await {
             Ok(data) => data,
             Err(e) => {
                 eprintln!("Failed to fetch transaction: {e}");
@@ -223,13 +308,32 @@ async fn main() {
         std::process::exit(1);
     };
 
-    let tx = match fill_decoder::decode_transaction_base64(&b64) {
+    let mut tx = match fill_decoder::decode_transaction_base64(&b64) {
         Ok(tx) => tx,
         Err(e) => {
             eprintln!("Failed to decode transaction: {e}");
             std::process::exit(1);
         }
     };
+
+    // Resolve LookupReadonly[N] / LookupWritable[N] placeholders if we have
+    // an RPC URL and the message references any address lookup tables.
+    if let Some(rpc_url) = cli.rpc_url.as_deref() {
+        let table_addresses: Vec<String> = tx
+            .message
+            .address_table_lookups
+            .iter()
+            .map(|l| l.account_key.clone())
+            .collect();
+        if !table_addresses.is_empty() {
+            match fetch_lookup_tables(rpc_url, &table_addresses).await {
+                Ok(tables) => fill_decoder::resolve_address_lookups(&mut tx.message, &tables),
+                Err(e) => eprintln!(
+                    "warning: failed to fetch lookup tables, leaving placeholders: {e}"
+                ),
+            }
+        }
+    }
 
     let exclusivity: Vec<fill_decoder::ExclusivityReport> = if !cli.check_keys.is_empty() {
         let keys: Vec<&str> = cli.check_keys.iter().map(|s| s.as_str()).collect();
