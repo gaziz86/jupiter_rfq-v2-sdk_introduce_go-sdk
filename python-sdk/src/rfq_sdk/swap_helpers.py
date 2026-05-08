@@ -1,89 +1,36 @@
-"""Helper functions for processing swap updates."""
+"""Helper functions for processing swap updates.
 
-from typing import Optional, Tuple
-from protos.market_maker_pb2 import SwapUpdate, SwapMessageType
+Thin compatibility shim — the canonical helpers live on
+:class:`rfq_sdk.streaming.swap_update_helpers` (mirroring the Rust module
+``streaming::swap_update_helpers``). Import from there in new code.
+"""
 
+from .streaming import swap_update_helpers as _h
 
-def is_pong(swap_update: SwapUpdate) -> bool:
-    """Check if the swap update is a pong message."""
-    return swap_update.message_type == SwapMessageType.SWAP_MESSAGE_TYPE_PONG
+is_pong = _h.is_pong
+is_connection_ready = _h.is_connection_ready
+is_error = _h.is_error
+is_transaction_confirmed = _h.is_transaction_confirmed
+is_swap_available = _h.is_swap_available
+get_status_message = _h.get_status_message
+get_swap_uuid = _h.get_swap_uuid
+get_unsigned_transaction = _h.get_unsigned_transaction
+get_transaction_signature = _h.get_transaction_signature
+extract_confirmation_details = _h.extract_confirmation_details
+extract_swap_details = _h.extract_swap_details
+update_type_description = _h.update_type_description
 
-
-def is_connection_ready(swap_update: SwapUpdate) -> bool:
-    """Check if the swap update indicates connection is ready."""
-    return swap_update.message_type == SwapMessageType.SWAP_MESSAGE_TYPE_CONNECTION_READY
-
-
-def is_error(swap_update: SwapUpdate) -> bool:
-    """Check if the swap update is an error message."""
-    return swap_update.message_type == SwapMessageType.SWAP_MESSAGE_TYPE_ERROR
-
-
-def is_transaction_confirmed(swap_update: SwapUpdate) -> bool:
-    """Check if the swap update indicates a confirmed transaction."""
-    return swap_update.message_type == SwapMessageType.SWAP_MESSAGE_TYPE_TRANSACTION_CONFIRMED
-
-
-def is_swap_available(swap_update: SwapUpdate) -> bool:
-    """Check if the swap update indicates a swap is available."""
-    return swap_update.message_type == SwapMessageType.SWAP_MESSAGE_TYPE_SWAP_AVAILABLE
-
-
-def get_status_message(swap_update: SwapUpdate) -> Optional[str]:
-    """Extract the status message from a swap update."""
-    if hasattr(swap_update, 'status_message') and swap_update.status_message:
-        return swap_update.status_message
-    return None
-
-
-def extract_confirmation_details(swap_update: SwapUpdate) -> Optional[Tuple[str, str]]:
-    """
-    Extract confirmation details from a transaction confirmed update.
-    
-    Returns:
-        Tuple of (swap_uuid, transaction_signature) or None
-    """
-    if not is_transaction_confirmed(swap_update):
-        return None
-    
-    swap_uuid = swap_update.swap_uuid if hasattr(swap_update, 'swap_uuid') else ""
-    signature = swap_update.transaction_signature if hasattr(swap_update, 'transaction_signature') else ""
-    
-    if swap_uuid and signature:
-        return (swap_uuid, signature)
-    return None
-
-
-def extract_swap_details(swap_update: SwapUpdate) -> Optional[Tuple[str, str]]:
-    """
-    Extract swap details from a swap available update.
-    
-    Returns:
-        Tuple of (swap_uuid, unsigned_transaction) or None
-    """
-    if not is_swap_available(swap_update):
-        return None
-    
-    swap_uuid = swap_update.swap_uuid if hasattr(swap_update, 'swap_uuid') else ""
-    unsigned_tx = swap_update.unsigned_transaction if hasattr(swap_update, 'unsigned_transaction') else ""
-    
-    if swap_uuid and unsigned_tx:
-        return (swap_uuid, unsigned_tx)
-    return None
-
-
-def update_type_description(swap_update: SwapUpdate) -> str:
-    """Get a human-readable description of the swap update type."""
-    message_type = swap_update.message_type
-    
-    type_map = {
-        SwapMessageType.SWAP_MESSAGE_TYPE_PING: "Ping",
-        SwapMessageType.SWAP_MESSAGE_TYPE_PONG: "Pong",
-        SwapMessageType.SWAP_MESSAGE_TYPE_CONNECTION_READY: "Connection Ready",
-        SwapMessageType.SWAP_MESSAGE_TYPE_SWAP_AVAILABLE: "Swap Available",
-        SwapMessageType.SWAP_MESSAGE_TYPE_SWAP_SUBMIT: "Swap Submit",
-        SwapMessageType.SWAP_MESSAGE_TYPE_TRANSACTION_CONFIRMED: "Transaction Confirmed",
-        SwapMessageType.SWAP_MESSAGE_TYPE_ERROR: "Error",
-    }
-    
-    return type_map.get(message_type, f"Unknown ({message_type})")
+__all__ = [
+    "extract_confirmation_details",
+    "extract_swap_details",
+    "get_status_message",
+    "get_swap_uuid",
+    "get_transaction_signature",
+    "get_unsigned_transaction",
+    "is_connection_ready",
+    "is_error",
+    "is_pong",
+    "is_swap_available",
+    "is_transaction_confirmed",
+    "update_type_description",
+]

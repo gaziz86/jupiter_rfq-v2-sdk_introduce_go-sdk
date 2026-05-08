@@ -1,1 +1,18 @@
 target/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.venv/
+venv/
+
+# Generated protobuf stubs — produced by `python scripts/generate_protos.py`
+# or by `pip install` (see python-sdk/setup.py).
+python-sdk/src/protos/market_maker_pb2.py
+python-sdk/src/protos/market_maker_pb2_grpc.py

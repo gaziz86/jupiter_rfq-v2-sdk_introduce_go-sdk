@@ -1,152 +1,181 @@
-"""Main client implementation for the RFQv2 SDK."""
+"""Main client implementation for the RFQv2 SDK.
+
+Mirrors ``rust-sdk/src/client.rs``: provides :class:`MarketMakerClient`,
+the entry point for unary RPCs and bidirectional streaming.
+"""
 
 import asyncio
 import logging
-from datetime import datetime
-from typing import Optional, Tuple
+from datetime import timedelta
+from typing import List, Optional, Tuple
+
 import grpc
 
 from protos.market_maker_pb2 import (
-    SequenceNumberRequest,
+    Cluster,
     GetAllOrderbooksRequest,
+    GetAllOrderbooksResponse,
+    GetQuotesRequest,
+    GetQuotesResponse,
+    SequenceNumberRequest,
+    TokenPair,
 )
 from protos.market_maker_pb2_grpc import MarketMakerIngestionServiceStub
-from .stream_manager import QuoteStreamHandle, SwapStreamHandle, StreamConfig
-from .models import ClientConfig
+
+from .error import (
+    ConfigurationError,
+    ConnectionError as MMConnectionError,
+    GrpcError,
+    MarketMakerError,
+    TimeoutError,
+)
+from .reflection import ReflectionClient, ReflectionHandle, ServiceInfo
+from .streaming import (
+    QuoteStreamHandle,
+    StreamConfig,
+    SwapStreamHandle,
+)
+from .types import ClientConfig
 
 logger = logging.getLogger(__name__)
 
 
+# Channel options that mirror the keepalive settings from the Rust SDK.
+# (10s ping interval, 20s ping timeout, keepalive while idle, no message-size limit.)
+_KEEPALIVE_OPTIONS = [
+    ("grpc.keepalive_time_ms", 10_000),
+    ("grpc.keepalive_timeout_ms", 20_000),
+    ("grpc.keepalive_permit_without_calls", 1),
+    ("grpc.http2.max_pings_without_data", 0),
+    ("grpc.http2.min_time_between_pings_ms", 10_000),
+    ("grpc.http2.min_ping_interval_without_data_ms", 5_000),
+    ("grpc.max_send_message_length", -1),
+    ("grpc.max_receive_message_length", -1),
+]
+
+
 class MarketMakerClient:
-    """Main client for interacting with the RFQv2."""
+    """Main client for interacting with the RFQv2 service."""
 
     def __init__(self, config: ClientConfig):
-        """
-        Initialize the RFQv2 client.
-
-        Args:
-            config: Client configuration including endpoint and auth settings
-        """
         self.config = config
         self._channel: Optional[grpc.aio.Channel] = None
         self._stub: Optional[MarketMakerIngestionServiceStub] = None
 
-    async def __aenter__(self):
-        """Async context manager entry."""
+    # ------------------------------------------------------------------ #
+    # Async context manager
+    # ------------------------------------------------------------------ #
+    async def __aenter__(self) -> "MarketMakerClient":
         if self._channel is None:
             await self._establish_connection()
         return self
 
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
-        """Async context manager exit."""
+    async def __aexit__(self, exc_type, exc, tb) -> None:
         await self.close()
 
+    # ------------------------------------------------------------------ #
+    # Constructors
+    # ------------------------------------------------------------------ #
     @classmethod
-    async def connect(cls, endpoint: str, auth_token: Optional[str] = None) -> "MarketMakerClient":
-        """
-        Connect to the RFQv2 service with default configuration.
+    async def connect(
+        cls,
+        endpoint: str,
+        auth_token: Optional[str] = None,
+    ) -> "MarketMakerClient":
+        """Connect to the RFQv2 service with default configuration.
 
-        Args:
-            endpoint: gRPC service endpoint URL
-            auth_token: Optional authentication token
-
-        Returns:
-            Connected MarketMakerClient instance
+        Mirrors Rust's ``MarketMakerClient::connect``. ``auth_token`` is a
+        Python-only convenience — pass it here or via :class:`ClientConfig`.
         """
         config = ClientConfig(endpoint=endpoint, auth_token=auth_token)
-        client = await cls.connect_with_config(config)
-        return client
+        return await cls.connect_with_config(config)
 
     @classmethod
-    async def connect_with_config(cls, config: ClientConfig) -> "MarketMakerClient":
-        """
-        Connect to the RFQv2 service with custom configuration.
-
-        Args:
-            config: Client configuration
-
-        Returns:
-            Connected MarketMakerClient instance
-        """
-        logger.info(f"Connecting to RFQv2 service at {config.endpoint}")
+    async def connect_with_config(
+        cls, config: ClientConfig
+    ) -> "MarketMakerClient":
+        """Connect to the RFQv2 service with custom configuration."""
+        logger.info("Connecting to RFQv2 service at %s", config.endpoint)
         client = cls(config)
         await client._establish_connection()
         return client
 
-    async def _establish_connection(self):
-        """Establish the gRPC connection."""
-        if self.config.endpoint.startswith("https://"):
-            logger.debug("Configuring HTTPS connection with TLS")
-            credentials = grpc.ssl_channel_credentials()
-            self._channel = grpc.aio.secure_channel(
-                self.config.endpoint.replace("https://", ""),
-                credentials,
-                options=[
-                    ("grpc.max_send_message_length", -1),
-                    ("grpc.max_receive_message_length", -1),
-                ]
-            )
-        else:
-            logger.debug("Using insecure connection (development mode)")
-            self._channel = grpc.aio.insecure_channel(
-                self.config.endpoint.replace("http://", ""),
-                options=[
-                    ("grpc.max_send_message_length", -1),
-                    ("grpc.max_receive_message_length", -1),
-                ]
-            )
+    async def _establish_connection(self) -> None:
+        endpoint = self.config.endpoint
+        if not endpoint:
+            raise ConfigurationError("Invalid endpoint: empty")
+
+        try:
+            if endpoint.startswith("https://"):
+                logger.debug("Configuring HTTPS connection with TLS")
+                creds = grpc.ssl_channel_credentials()
+                target = endpoint[len("https://") :]
+                self._channel = grpc.aio.secure_channel(
+                    target, creds, options=_KEEPALIVE_OPTIONS
+                )
+            else:
+                logger.debug("Using HTTP/2 connection (plain text for development)")
+                target = endpoint
+                if target.startswith("http://"):
+                    target = target[len("http://") :]
+                self._channel = grpc.aio.insecure_channel(
+                    target, options=_KEEPALIVE_OPTIONS
+                )
+        except Exception as exc:
+            raise MMConnectionError(str(exc), source=exc) from exc
 
         self._stub = MarketMakerIngestionServiceStub(self._channel)
         logger.debug("Successfully connected to RFQv2 service")
 
-    def _get_metadata(self) -> list:
-        """Get metadata with authentication token if available."""
-        metadata = []
+    # ------------------------------------------------------------------ #
+    # Helpers
+    # ------------------------------------------------------------------ #
+    def _metadata(self) -> List[Tuple[str, str]]:
+        """Return metadata with the ``x-api-key`` auth header if configured."""
+        meta: List[Tuple[str, str]] = []
         if self.config.auth_token:
-            metadata.append(("x-api-key", self.config.auth_token))
+            meta.append(("x-api-key", self.config.auth_token))
             logger.debug("Added authentication token to request metadata")
-        return metadata
+        return meta
 
-    async def start_quote_streaming(
+    def _require_stub(self) -> MarketMakerIngestionServiceStub:
+        if self._stub is None:
+            raise MMConnectionError("Client is not connected")
+        return self._stub
+
+    # ------------------------------------------------------------------ #
+    # Streaming
+    # ------------------------------------------------------------------ #
+    async def start_streaming(
         self, config: Optional[StreamConfig] = None
     ) -> QuoteStreamHandle:
-        """
-        Start a bidirectional gRPC streaming connection for real-time quote updates.
+        """Start a bidirectional gRPC stream for real-time quote updates."""
+        return await self.start_streaming_with_config(config)
 
-        Args:
-            config: Optional stream configuration
-
-        Returns:
-            QuoteStreamHandle for managing the stream
-        """
+    async def start_streaming_with_config(
+        self, config: Optional[StreamConfig] = None
+    ) -> QuoteStreamHandle:
+        """Start a quote stream with a custom :class:`StreamConfig`."""
         stream_config = config or StreamConfig()
+        stub = self._require_stub()
         logger.info("Starting bidirectional gRPC streaming connection")
 
-        # Create queue for outgoing quotes
-        quote_queue = asyncio.Queue(maxsize=stream_config.send_buffer_size)
+        quote_queue: asyncio.Queue = asyncio.Queue(maxsize=stream_config.send_buffer_size)
 
-        async def quote_iterator():
-            """Async generator for outgoing quotes."""
+        async def request_iterator():
             while True:
-                try:
-                    quote = await asyncio.wait_for(
-                        quote_queue.get(),
-                        timeout=stream_config.operation_timeout.total_seconds()
-                    )
-                    if quote is None:  # Shutdown signal
-                        break
-                    yield quote
-                except asyncio.TimeoutError:
-                    continue
-                except Exception as e:
-                    logger.error(f"Error in quote iterator: {e}")
+                item = await quote_queue.get()
+                if item is None:
                     break
+                yield item
 
-        # Establish bidirectional stream
-        update_stream = self._stub.StreamQuotes(
-            quote_iterator(),
-            metadata=self._get_metadata()
-        )
+        try:
+            update_stream = stub.StreamQuotes(
+                request_iterator(),
+                metadata=self._metadata(),
+            )
+        except grpc.RpcError as rpc_err:
+            raise GrpcError(rpc_err) from rpc_err
 
         logger.debug("gRPC streaming connection established successfully")
         return QuoteStreamHandle(quote_queue, update_stream, stream_config)
@@ -154,98 +183,92 @@ class MarketMakerClient:
     async def start_swap_streaming(
         self, config: Optional[StreamConfig] = None
     ) -> SwapStreamHandle:
-        """
-        Start a bidirectional gRPC streaming connection for swap updates.
-
-        Args:
-            config: Optional stream configuration
-
-        Returns:
-            SwapStreamHandle for managing the stream
-        """
+        """Start a bidirectional gRPC stream for swap updates."""
         stream_config = config or StreamConfig()
+        stub = self._require_stub()
         logger.info("Starting bidirectional gRPC swap streaming connection")
 
-        # Create queue for outgoing swaps
-        swap_queue = asyncio.Queue(maxsize=stream_config.send_buffer_size)
+        swap_queue: asyncio.Queue = asyncio.Queue(maxsize=stream_config.send_buffer_size)
 
-        async def swap_iterator():
-            """Async generator for outgoing swaps."""
+        async def request_iterator():
             while True:
-                try:
-                    swap = await asyncio.wait_for(
-                        swap_queue.get(),
-                        timeout=stream_config.operation_timeout.total_seconds()
-                    )
-                    if swap is None:  # Shutdown signal
-                        break
-                    yield swap
-                except asyncio.TimeoutError:
-                    continue
-                except Exception as e:
-                    logger.error(f"Error in swap iterator: {e}")
+                item = await swap_queue.get()
+                if item is None:
                     break
+                yield item
 
-        # Establish bidirectional stream
-        update_stream = self._stub.StreamSwap(
-            swap_iterator(),
-            metadata=self._get_metadata()
-        )
+        try:
+            update_stream = stub.StreamSwap(
+                request_iterator(),
+                metadata=self._metadata(),
+            )
+        except grpc.RpcError as rpc_err:
+            raise GrpcError(rpc_err) from rpc_err
 
         logger.debug("gRPC swap streaming connection established successfully")
         return SwapStreamHandle(swap_queue, update_stream, stream_config)
 
+    # ------------------------------------------------------------------ #
+    # Unary RPCs
+    # ------------------------------------------------------------------ #
     async def get_last_sequence_number(
-        self, maker_id: str, auth_token: str
+        self, maker_id: str, auth_token: Optional[str] = None
     ) -> int:
+        """Get the last sequence number for a maker (synchronization helper).
+
+        ``auth_token`` defaults to the one configured on the client.
         """
-        Get the last sequence number for a maker (for synchronization before streaming).
+        stub = self._require_stub()
+        token = auth_token if auth_token is not None else (self.config.auth_token or "")
+        logger.debug("Getting last sequence number for maker: %s", maker_id)
 
-        Args:
-            maker_id: RFQv2 identifier
-            auth_token: Authentication token
-
-        Returns:
-            Last sequence number for the maker
-        """
-        logger.debug(f"Getting last sequence number for maker: {maker_id}")
-
-        request = SequenceNumberRequest(
-            maker_id=maker_id,
-            auth_token=auth_token
-        )
+        request = SequenceNumberRequest(maker_id=maker_id, auth_token=token)
 
         try:
-            response = await self._stub.GetLastSequenceNumber(request)
+            response = await stub.GetLastSequenceNumber(
+                request, metadata=self._metadata()
+            )
+        except grpc.RpcError as rpc_err:
+            raise GrpcError(rpc_err) from rpc_err
 
-            if response.success:
-                logger.debug(
-                    f"Retrieved last sequence number for maker {maker_id}: "
-                    f"{response.last_sequence_number}"
-                )
-                return response.last_sequence_number
-            else:
-                logger.warning(
-                    f"Failed to get sequence number for maker {maker_id}: "
-                    f"{response.message}"
-                )
-                return 0
-        except grpc.RpcError as e:
-            logger.error(f"gRPC error getting sequence number: {e}")
-            raise
+        if response.success:
+            logger.debug(
+                "Retrieved last sequence number for maker %s: %d",
+                maker_id,
+                response.last_sequence_number,
+            )
+            return response.last_sequence_number
+
+        logger.warning(
+            "Failed to get sequence number for maker %s: %s",
+            maker_id,
+            response.message,
+        )
+        return 0
+
+    async def get_quotes(
+        self, token_pair: TokenPair, auth_token: Optional[str] = None
+    ) -> GetQuotesResponse:
+        """Fetch quotes for a specific token pair."""
+        stub = self._require_stub()
+        token = auth_token if auth_token is not None else (self.config.auth_token or "")
+        logger.debug("Getting quotes for token pair")
+
+        request = GetQuotesRequest(token_pair=token_pair, auth_token=token)
+
+        try:
+            response = await stub.GetQuotes(request, metadata=self._metadata())
+        except grpc.RpcError as rpc_err:
+            raise GrpcError(rpc_err) from rpc_err
+
+        logger.info("Retrieved %d quotes", len(response.quotes))
+        return response
 
     async def get_all_orderbooks(
         self, cluster: Optional[int] = None
-    ):
-        """
-        Get all orderbooks for a specific cluster or all clusters.
-
-        Args:
-            cluster: Optional cluster filter (mainnet/devnet)
-
-        Returns:
-            GetAllOrderbooksResponse containing orderbooks
-        """
+    ) -> GetAllOrderbooksResponse:
+        """Receive an update containing all orderbooks for the given cluster."""
+        stub = self._require_stub()
         logger.debug("Receiving update for all orderbooks")
 
         request = GetAllOrderbooksRequest()
@@ -253,98 +276,133 @@ class MarketMakerClient:
             request.cluster = cluster
 
         try:
-            response = await self._stub.GetAllOrderbooks(request)
-
-            logger.info(
-                f"Retrieved {len(response.orderbooks)} orderbooks at "
-                f"timestamp {response.timestamp}"
+            response = await stub.GetAllOrderbooks(
+                request, metadata=self._metadata()
             )
-            return response
-        except grpc.RpcError as e:
-            logger.error(f"gRPC error getting orderbooks: {e}")
-            raise
+        except grpc.RpcError as rpc_err:
+            raise GrpcError(rpc_err) from rpc_err
 
-    async def start_quote_streaming_with_sync(
+        logger.info(
+            "Retrieved %d orderbooks at timestamp %d",
+            len(response.orderbooks),
+            response.timestamp,
+        )
+        return response
+
+    # Alias matching Rust's `receive_update` method
+    async def receive_update(
+        self, cluster: Optional[int] = None
+    ) -> GetAllOrderbooksResponse:
+        """Alias for :meth:`get_all_orderbooks` (mirrors Rust's ``receive_update``)."""
+        return await self.get_all_orderbooks(cluster=cluster)
+
+    # ------------------------------------------------------------------ #
+    # Convenience: streaming + sync
+    # ------------------------------------------------------------------ #
+    async def start_streaming_with_sync(
         self,
         maker_id: str,
-        auth_token: str,
-        stream_config: Optional[StreamConfig] = None
+        auth_token: Optional[str] = None,
+        stream_config: Optional[StreamConfig] = None,
     ) -> Tuple[QuoteStreamHandle, int]:
-        """
-        Start streaming with automatic sequence number synchronization.
-
-        Args:
-            maker_id: RFQv2 identifier
-            auth_token: Authentication token
-            stream_config: Optional stream configuration
-
-        Returns:
-            Tuple of (QuoteStreamHandle, next_sequence_number)
-        """
-        logger.debug(
-            f"Starting streaming with sequence number synchronization for maker: {maker_id}"
+        """Start streaming with automatic sequence number synchronization."""
+        return await self.start_streaming_with_sync_and_config(
+            maker_id, auth_token, stream_config
         )
 
-        last_sequence = await self.get_last_sequence_number(maker_id, auth_token)
-        stream_handle = await self.start_quote_streaming(stream_config)
+    async def start_streaming_with_sync_and_config(
+        self,
+        maker_id: str,
+        auth_token: Optional[str] = None,
+        stream_config: Optional[StreamConfig] = None,
+    ) -> Tuple[QuoteStreamHandle, int]:
+        """Start streaming with sequence sync and a custom :class:`StreamConfig`."""
+        token = auth_token if auth_token is not None else (self.config.auth_token or "")
+        logger.debug(
+            "Starting streaming with sequence number synchronization for maker: %s",
+            maker_id,
+        )
+
+        last_sequence = await self.get_last_sequence_number(maker_id, token)
+        handle = await self.start_streaming_with_config(stream_config)
         next_sequence = last_sequence + 1
 
         logger.debug(
-            f"Sequence sync complete for maker {maker_id}: "
-            f"last={last_sequence}, next={next_sequence}"
+            "Sequence sync complete for maker %s: last=%d, next=%d",
+            maker_id,
+            last_sequence,
+            next_sequence,
         )
+        return handle, next_sequence
 
-        return stream_handle, next_sequence
+    # ------------------------------------------------------------------ #
+    # Reflection
+    # ------------------------------------------------------------------ #
+    def reflection(self) -> ReflectionHandle:
+        """Return a :class:`ReflectionHandle` bound to this client's endpoint."""
+        return ReflectionHandle(self.config.endpoint)
 
-    async def close(self):
+    async def list_services(self) -> List[str]:
+        """List all gRPC services advertised by the server via reflection."""
+        logger.info("Querying server reflection for available services")
+        client = await ReflectionClient.connect(self.config.endpoint)
+        try:
+            return await client.list_services()
+        finally:
+            await client.close()
+
+    async def verify_service(self) -> ServiceInfo:
+        """Verify the ``MarketMakerIngestionService`` is available on the server."""
+        logger.info("Verifying MarketMakerIngestionService availability via reflection")
+        client = await ReflectionClient.connect(self.config.endpoint)
+        try:
+            return await client.verify_market_maker_service()
+        finally:
+            await client.close()
+
+    # ------------------------------------------------------------------ #
+    # Cleanup
+    # ------------------------------------------------------------------ #
+    async def close(self) -> None:
         """Close the gRPC connection."""
-        if self._channel:
+        if self._channel is not None:
             logger.info("Closing gRPC connection")
             await self._channel.close()
             self._channel = None
             self._stub = None
 
+    # ------------------------------------------------------------------ #
+    # Static lifecycle helpers (mirror Rust's static methods)
+    # ------------------------------------------------------------------ #
     @staticmethod
     async def shutdown_stream_with_timeout(
-        stream: QuoteStreamHandle,
-        timeout: float
-    ):
-        """
-        Properly shutdown a streaming connection with timeout.
-
-        Args:
-            stream: The stream to shutdown
-            timeout: Timeout in seconds
-        """
-        logger.info(f"Shutting down streaming connection with timeout: {timeout}s")
+        stream: QuoteStreamHandle, timeout: float
+    ) -> None:
+        """Close a quote stream within ``timeout`` seconds."""
+        logger.info("Shutting down streaming connection with timeout: %.1fs", timeout)
         try:
-            await asyncio.wait_for(stream.close(), timeout=timeout)
+            await stream.close_with_timeout(timeout)
             logger.info("Stream shutdown completed successfully")
-        except asyncio.TimeoutError:
-            logger.warning(f"Stream shutdown timed out after {timeout}s")
+        except TimeoutError:
+            logger.warning("Stream shutdown timed out after %.1fs", timeout)
+            raise
+        except MarketMakerError as exc:
+            logger.warning("Stream shutdown encountered issues: %s", exc)
             raise
 
     @staticmethod
     async def shutdown_stream_with_stats(
-        stream: QuoteStreamHandle,
-        timeout: float
-    ):
-        """
-        Shutdown a stream with statistics reporting.
-
-        Args:
-            stream: The stream to shutdown
-            timeout: Timeout in seconds
-        """
+        stream: QuoteStreamHandle, timeout: float
+    ) -> None:
+        """Print final stats then close a quote stream within ``timeout``."""
         logger.info("Collecting final statistics before shutdown")
-        stats = stream.get_stats()
-
+        stats = await stream.get_stats()
         logger.info("Final Stream Statistics:")
-        logger.info(f"  Messages sent: {stats['messages_sent']}")
-        logger.info(f"  Updates received: {stats['updates_received']}")
-        logger.info(f"  Errors encountered: {stats['errors_encountered']}")
-
-        connected_duration = datetime.now() - stats['connected_at']
-        logger.info(f"  Connected for: {connected_duration}")
-
+        logger.info("Messages sent: %d", stats.messages_sent)
+        logger.info("Updates received: %d", stats.updates_received)
+        logger.info("Errors encountered: %d", stats.errors_encountered)
+        logger.info("Connected for: %s", stats.elapsed())
         await MarketMakerClient.shutdown_stream_with_timeout(stream, timeout)
+
+
+__all__ = ["MarketMakerClient"]

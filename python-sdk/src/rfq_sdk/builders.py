@@ -1,171 +1,198 @@
-"""Builder pattern for constructing MarketMakerQuote objects."""
+"""Builder patterns for creating RFQv2 quotes and requests.
 
+Mirrors ``rust-sdk/src/builders.rs``. The primary entry point is
+:class:`MarketMakerQuoteBuilder` (also exported as :class:`QuoteBuilder`
+for backward compatibility). The Rust SDK exposes ``MarketMakerQuote::builder()``
+— in Python this is :func:`market_maker_quote_builder` or you can call
+:meth:`MarketMakerQuoteBuilder.new` directly.
+"""
+
+from datetime import datetime, timezone
 from typing import List, Optional
+
 from protos.market_maker_pb2 import (
-    MarketMakerQuote,
-    TokenPair,
-    PriceLevel,
     Cluster,
+    MarketMakerQuote,
+    PriceLevel,
+    TokenPair,
 )
-from .utils import current_timestamp_micros
+
+from .error import ValidationError
+from .types import TokenPairHelper
+
+# 30 seconds in microseconds — matches the Rust default
+DEFAULT_QUOTE_EXPIRY_MICROS: int = 30_000_000
 
 
-class QuoteBuilder:
-    """Builder for creating MarketMakerQuote objects with validation."""
+class MarketMakerQuoteBuilder:
+    """Builder for creating :class:`MarketMakerQuote` instances.
 
-    def __init__(self):
-        """Initialize a new quote builder."""
-        self._timestamp: Optional[int] = None
-        self._sequence_number: Optional[int] = None
-        self._quote_expiry_time: int = 10_000_000  # 10 seconds default
+    Mirrors the Rust ``MarketMakerQuoteBuilder``. All setter methods return
+    ``self`` for fluent chaining, ending in :meth:`build` which validates the
+    quote and returns the protobuf message.
+    """
+
+    def __init__(self) -> None:
         self._maker_id: Optional[str] = None
-        self._maker_address: Optional[str] = None
-        self._lot_size_base: int = 1000000  # 0.001 SOL default
-        self._cluster: Cluster = Cluster.CLUSTER_MAINNET
+        self._cluster: int = Cluster.CLUSTER_MAINNET
         self._token_pair: Optional[TokenPair] = None
         self._bid_levels: List[PriceLevel] = []
         self._ask_levels: List[PriceLevel] = []
+        self._quote_expiry_time: int = DEFAULT_QUOTE_EXPIRY_MICROS
+        self._timestamp: Optional[int] = None
+        self._sequence_number: Optional[int] = None
+        self._maker_address: Optional[str] = None
+        self._lot_size_base: Optional[int] = None
 
-    def timestamp(self, timestamp: int) -> "QuoteBuilder":
-        """Set the timestamp (in microseconds)."""
-        self._timestamp = timestamp
-        return self
+    # ------------------------------------------------------------------ #
+    # Constructors
+    # ------------------------------------------------------------------ #
+    @classmethod
+    def new(cls) -> "MarketMakerQuoteBuilder":
+        """Create a new builder."""
+        return cls()
 
-    def current_timestamp(self) -> "QuoteBuilder":
-        """Set the timestamp to current time."""
-        self._timestamp = current_timestamp_micros()
-        return self
+    @classmethod
+    def from_quote(cls, quote: MarketMakerQuote) -> "MarketMakerQuoteBuilder":
+        """Create a builder seeded with values from an existing quote.
 
-    def sequence_number(self, seq: int) -> "QuoteBuilder":
-        """Set the sequence number."""
-        self._sequence_number = seq
-        return self
+        Mirrors the Rust ``MarketMakerQuoteBuilderExt::to_builder`` method.
+        """
+        b = cls()
+        b._maker_id = quote.maker_id
+        b._cluster = quote.cluster
+        b._token_pair = quote.token_pair
+        b._bid_levels = list(quote.bid_levels)
+        b._ask_levels = list(quote.ask_levels)
+        b._quote_expiry_time = quote.quote_expiry_time
+        b._timestamp = quote.timestamp
+        b._sequence_number = quote.sequence_number
+        b._maker_address = quote.maker_address
+        b._lot_size_base = quote.lot_size_base
+        return b
 
-    def quote_expiry_time(self, expiry_micros: int) -> "QuoteBuilder":
-        """Set the quote expiry time in microseconds."""
-        self._quote_expiry_time = expiry_micros
-        return self
-
-    def quote_expiry_seconds(self, expiry_secs: float) -> "QuoteBuilder":
-        """Set the quote expiry time in seconds (converted to microseconds)."""
-        self._quote_expiry_time = int(expiry_secs * 1_000_000)
-        return self
-
-    def maker_id(self, maker_id: str) -> "QuoteBuilder":
+    # ------------------------------------------------------------------ #
+    # Setters (mirror Rust method names)
+    # ------------------------------------------------------------------ #
+    def maker_id(self, maker_id: str) -> "MarketMakerQuoteBuilder":
         """Set the maker ID."""
         self._maker_id = maker_id
         return self
 
-    def maker_address(self, address: str) -> "QuoteBuilder":
-        """Set the maker address."""
-        self._maker_address = address
-        return self
-
-    def lot_size_base(self, lot_size: int) -> "QuoteBuilder":
-        """Set the minimum lot size for the base token."""
-        self._lot_size_base = lot_size
-        return self
-
-    def cluster(self, cluster: Cluster) -> "QuoteBuilder":
+    def cluster(self, cluster: int) -> "MarketMakerQuoteBuilder":
         """Set the cluster (mainnet/devnet)."""
         self._cluster = cluster
         return self
 
-    def token_pair(self, token_pair: TokenPair) -> "QuoteBuilder":
+    def token_pair(self, token_pair: TokenPair) -> "MarketMakerQuoteBuilder":
         """Set the token pair."""
         self._token_pair = token_pair
         return self
 
-    def add_bid_level(self, volume: int, price: int) -> "QuoteBuilder":
-        """Add a bid level."""
+    def sol_usdc_pair(self) -> "MarketMakerQuoteBuilder":
+        """Use the SOL/USDC token pair."""
+        self._token_pair = TokenPairHelper.sol_usdc()
+        return self
+
+    def eth_usdc_pair(self) -> "MarketMakerQuoteBuilder":
+        """Use the ETH/USDC token pair."""
+        self._token_pair = TokenPairHelper.eth_usdc()
+        return self
+
+    def bid_level(self, volume: int, price: int) -> "MarketMakerQuoteBuilder":
+        """Add a single bid level."""
         self._bid_levels.append(PriceLevel(volume=volume, price=price))
         return self
 
-    def add_ask_level(self, volume: int, price: int) -> "QuoteBuilder":
-        """Add an ask level."""
+    def bid_levels(self, levels: List[PriceLevel]) -> "MarketMakerQuoteBuilder":
+        """Append multiple bid levels."""
+        self._bid_levels.extend(levels)
+        return self
+
+    def ask_level(self, volume: int, price: int) -> "MarketMakerQuoteBuilder":
+        """Add a single ask level."""
         self._ask_levels.append(PriceLevel(volume=volume, price=price))
         return self
 
-    def bid_levels(self, levels: List[PriceLevel]) -> "QuoteBuilder":
-        """Set all bid levels at once."""
-        self._bid_levels = levels
+    def ask_levels(self, levels: List[PriceLevel]) -> "MarketMakerQuoteBuilder":
+        """Append multiple ask levels."""
+        self._ask_levels.extend(levels)
         return self
 
-    def ask_levels(self, levels: List[PriceLevel]) -> "QuoteBuilder":
-        """Set all ask levels at once."""
-        self._ask_levels = levels
+    def expiry_time_micros(self, micros: int) -> "MarketMakerQuoteBuilder":
+        """Set quote expiry time in microseconds."""
+        self._quote_expiry_time = micros
         return self
 
-    def clear_bids(self) -> "QuoteBuilder":
-        """Clear all bid levels."""
-        self._bid_levels = []
-        return self
+    def expiry_time_secs(self, secs: int) -> "MarketMakerQuoteBuilder":
+        """Set quote expiry time in seconds.
 
-    def clear_asks(self) -> "QuoteBuilder":
-        """Clear all ask levels."""
-        self._ask_levels = []
-        return self
-
-    def validate(self) -> List[str]:
+        .. note::
+           To match the Rust SDK's behaviour exactly, this setter writes the
+           given value verbatim to the underlying field (which the proto
+           documents as microseconds). Use :meth:`expiry_time_micros` if you
+           want explicit unit conversion.
         """
-        Validate the quote configuration.
+        self._quote_expiry_time = secs
+        return self
 
-        Returns:
-            List of validation error messages (empty if valid)
-        """
-        errors = []
+    def maker_address(self, address: str) -> "MarketMakerQuoteBuilder":
+        """Set the maker's Solana address."""
+        self._maker_address = address
+        return self
 
-        if self._timestamp is None:
-            errors.append("Timestamp is required")
-        if self._sequence_number is None:
-            errors.append("Sequence number is required")
-        if not self._maker_id:
-            errors.append("Maker ID is required")
-        if not self._maker_address:
-            errors.append("Maker address is required")
-        if self._token_pair is None:
-            errors.append("Token pair is required")
-        if not self._bid_levels and not self._ask_levels:
-            errors.append("At least one bid or ask level is required")
+    def timestamp(self, timestamp_micros: int) -> "MarketMakerQuoteBuilder":
+        """Set a custom timestamp in microseconds."""
+        self._timestamp = timestamp_micros
+        return self
 
-        # Validate bid levels are sorted descending by price
-        if self._bid_levels:
-            prices = [level.price for level in self._bid_levels]
-            if prices != sorted(prices, reverse=True):
-                errors.append("Bid levels should be sorted by price (highest first)")
+    def sequence_number(self, seq: int) -> "MarketMakerQuoteBuilder":
+        """Set the sequence number."""
+        self._sequence_number = seq
+        return self
 
-        # Validate ask levels are sorted ascending by price
-        if self._ask_levels:
-            prices = [level.price for level in self._ask_levels]
-            if prices != sorted(prices):
-                errors.append("Ask levels should be sorted by price (lowest first)")
+    def lot_size_base(self, lot_size: int) -> "MarketMakerQuoteBuilder":
+        """Set the lot size for the base token."""
+        self._lot_size_base = lot_size
+        return self
 
-        # Validate no negative prices or volumes
-        for level in self._bid_levels + self._ask_levels:
-            if level.price <= 0:
-                errors.append(f"Invalid price: {level.price}")
-            if level.volume <= 0:
-                errors.append(f"Invalid volume: {level.volume}")
-
-        return errors
-
+    # ------------------------------------------------------------------ #
+    # Build
+    # ------------------------------------------------------------------ #
     def build(self) -> MarketMakerQuote:
-        """
-        Build the MarketMakerQuote.
+        """Validate the configuration and produce a :class:`MarketMakerQuote`.
 
-        Returns:
-            Constructed MarketMakerQuote
-
-        Raises:
-            ValueError: If validation fails
+        Raises :class:`ValidationError` if required fields are missing or any
+        bid/ask level has zero volume or price.
         """
-        errors = self.validate()
-        if errors:
-            raise ValueError(f"Quote validation failed: {', '.join(errors)}")
+        if self._maker_id is None:
+            raise ValidationError("maker_id is required")
+        if self._token_pair is None:
+            raise ValidationError("token_pair is required")
+        if not self._bid_levels and not self._ask_levels:
+            raise ValidationError("at least one bid or ask level is required")
+
+        for level in list(self._bid_levels) + list(self._ask_levels):
+            if level.price == 0:
+                raise ValidationError("price cannot be zero")
+            if level.volume == 0:
+                raise ValidationError("volume cannot be zero")
+
+        if self._maker_address is None:
+            raise ValidationError("maker_address is required")
+        if self._lot_size_base is None:
+            raise ValidationError("lot_size_base is required")
+
+        timestamp = (
+            self._timestamp
+            if self._timestamp is not None
+            else int(datetime.now(timezone.utc).timestamp() * 1_000_000)
+        )
+        sequence_number = self._sequence_number if self._sequence_number is not None else 1
 
         return MarketMakerQuote(
-            timestamp=self._timestamp,
-            sequence_number=self._sequence_number,
+            timestamp=timestamp,
+            sequence_number=sequence_number,
             quote_expiry_time=self._quote_expiry_time,
             maker_id=self._maker_id,
             maker_address=self._maker_address,
@@ -176,7 +203,19 @@ class QuoteBuilder:
             ask_levels=self._ask_levels,
         )
 
-    @classmethod
-    def new(cls) -> "QuoteBuilder":
-        """Create a new quote builder."""
-        return cls()
+
+# Backward compatible alias — older code uses ``QuoteBuilder``.
+QuoteBuilder = MarketMakerQuoteBuilder
+
+
+def market_maker_quote_builder() -> MarketMakerQuoteBuilder:
+    """Convenience function mirroring Rust's ``MarketMakerQuote::builder()``."""
+    return MarketMakerQuoteBuilder.new()
+
+
+__all__ = [
+    "DEFAULT_QUOTE_EXPIRY_MICROS",
+    "MarketMakerQuoteBuilder",
+    "QuoteBuilder",
+    "market_maker_quote_builder",
+]
