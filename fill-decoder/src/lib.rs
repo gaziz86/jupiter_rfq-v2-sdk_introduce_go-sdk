@@ -559,4 +559,35 @@ mod tests {
         assert_eq!(reports.len(), 2);
         assert!(reports.iter().all(|r| r.is_exclusive()));
     }
+
+    /// 4-step Jupiter route_v2 where the RFQ leg sits mid-chain
+    /// (input_index = 2, fed by an upstream RaydiumClmm step's output).
+    const REAL_TX4_BASE64: &str = "AuqP2BRrYGvIj/W7IBvvHyVEx/Wcz0Wm0CaCKATCWu8p6pZGezgaDdrWsRow7IJ0eqSa1uAb9AngHuRSL6NwWQkVNwTug9FqMeZW3bHCLaKYjnEF/eg8qCJEkJGz2O4sP3NRjTumDDEAI1m5Hn47x1FTmIyKYB7KxvwfjRgrQwsDgAIBBhIXivRTIfL2uclOoIDaVlBRpbZc0/1vt/0tfj2F5/QWGcOAvIYcfaKJKbntsRZhkmE5z6xpVI3UbVOSlAkYpnljIX3c5GeIjZQcJMPv+W9LORUt/YNNiYuyDC5Va3cg7p1YQqAVCY/gBTNjDhUjvsFmo9dtqaQsQOlQPBLYpWjpplzPNY+qGCNzKDGfvcpquLUNmZGsvm3fcwmDcTz0Gcq8e4ue0QRgjQsXQGRHxH6q7feThbaaa1qKHMGdrm01qO+PPTr71nYMqeKudzQr8hwkyc5nl/ZBHKqHn+WoZzDRHotko3tr+j4T3bf58aiXZfUv+dBChleWTWDBjxOB/BORjV2jRG3lLHpikQscgXyH/fbz98hlrGb2KJ2mI0wuGJGvvWBkXYRoVQrowF+Qj0uxxf4glrSiRkPLjfRw11+Zl9NvPqZ7il6X2pDA57IZpJ4hICBvo5Lb9BnL7zRf9rw86zUZxt7gqJneytRCD2WD/g7IaVAM5kiJ4AsS6/qnnbwDBkZv5SEXMv/srbpyw5vnvIzlu8X3EmssQ5s6QAAAALw1n9V4Uh7ztRZFBlw3IE5nZpsKp/d96y1JFGAScORfCeTUjwGeOKmNaN8QhVjkQuAyPqrOdqWbR2vIsdN/sy4EedVb8jHAbu50xW7OaBUH/bGy3qP0jlECsc2iVrwTjwan1RcYe9FmNdrUBFX9wsDBJMaPIVZ1pdu6y18IAAAABt324ddloZPZy+FGzut5rBy0he1fWzeROoz1hX7/AKkwCSNhP6lRiaATYvHGYgVAlrUDkQIVTEOdi7Tlpw7JAwUMAAUCalgEAAwACQMEEQQAAAAAAA8FCQAjER8Jk/F7ZPSErnb3Dz4ACgYqDRERDyAPCyURESQAEiojChQJFQcCCBMpACgaCgMZGx4RHRwPDgABCQMEBSMhEREQJxEWJhcYCQYAImm7ZPrMMcSvFAAw7326AgAAY2YXEwAAAABkAAoAAAAEAAAALwEANxEAAxrZFQACeAAsAAAAgKwBagAAAAABAAAAAAAAAICWmAAAAAAAAQAAAJ6KDgAAAAAACgAAAAAAAAAQJwIDaRAnAwQRAwkAAAEJBCm/lQcqT78E33F1k+c4vMwhJygVwkcagNn59VWw1IQlAAUTACgBF3e1Hwi9jFUGJi6HHxxyBS+upOGzy/UKPjOBDttDtzudBFg+WTsCNj3FowmaMdRo5uFCzdySENNYqALhvJ3Zs7YaaCHuvsvC5AMoJCcCGRf10YNGzrwO3aesPuetei3vDGJDYVRvEkiu3YQxk0PsAwZUUFVvcFcDAwQc";
+
+    #[test]
+    fn test_mid_chain_rfq_leg_does_not_inherit_route_in_amount() {
+        let tx = decode_transaction_base64(REAL_TX4_BASE64).unwrap();
+        let fill_ix = tx
+            .message
+            .instructions
+            .iter()
+            .find(|ix| ix.fill.is_some())
+            .expect("should find embedded fill in Jupiter route_v2");
+
+        let (fill, analysis) = fill_ix.fill.as_ref().unwrap();
+
+        assert_eq!(fill.taker_side, Side::Bid);
+        assert_eq!(fill.amount_in_atoms, 0);
+        assert_eq!(fill.params.tick_size_qpb, 1);
+        assert_eq!(fill.params.lot_size_base, 10_000_000);
+        assert_eq!(fill.params.levels.len(), 1);
+        assert_eq!(fill.params.levels[0].px_ticks, 952_990);
+        assert_eq!(fill.params.levels[0].qty_lots, 10);
+
+        assert_eq!(analysis.amount_in_atoms, 0);
+        assert_eq!(analysis.amount_spent_atoms, 0);
+        assert_eq!(analysis.amount_out_atoms, 0);
+        assert_eq!(analysis.levels_consumed, 0);
+        assert_eq!(analysis.total_lots_filled, 0);
+    }
 }

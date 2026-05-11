@@ -4,7 +4,7 @@ use std::io::Cursor;
 
 use borsh::BorshDeserialize;
 
-use crate::analysis::analyze_fill;
+use crate::analysis::{analyze_fill, is_params_plausible};
 use crate::types::{FillAnalysis, FillExactInInstruction, FillExactInParams, Side};
 
 /// Scan raw instruction data for an embedded `fill_exact_in` argument pattern.
@@ -91,21 +91,4 @@ pub fn scan_for_embedded_fill(data: &[u8]) -> Option<(FillExactInInstruction, Fi
 
 fn is_plausible(ix: &FillExactInInstruction) -> bool {
     ix.amount_in_atoms > 0 && is_params_plausible(&ix.params)
-}
-
-fn is_params_plausible(p: &FillExactInParams) -> bool {
-    p.tick_size_qpb > 0
-        && p.lot_size_base > 0
-        && p.tick_size_qpb <= 1_000_000_000_000
-        && p.lot_size_base <= 1_000_000_000_000
-        && !p.levels.is_empty()
-        && p.levels.len() <= 20
-        && p.levels.iter().all(|l| l.px_ticks > 0 && l.qty_lots > 0)
-        && {
-            let max_px = p.levels.iter().map(|l| l.px_ticks).max().unwrap();
-            let min_px = p.levels.iter().map(|l| l.px_ticks).min().unwrap();
-            max_px <= min_px.saturating_mul(10) && max_px <= 1_000_000_000_000_000
-        }
-        && (p.levels.windows(2).all(|w| w[0].px_ticks <= w[1].px_ticks)
-            || p.levels.windows(2).all(|w| w[0].px_ticks >= w[1].px_ticks))
 }
