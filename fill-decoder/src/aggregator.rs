@@ -2,7 +2,7 @@
 
 use borsh::BorshDeserialize;
 
-use crate::analysis::analyze_fill;
+use crate::analysis::{analyze_fill, is_params_plausible};
 use crate::decode::FILL_EXACT_IN_DISCRIMINATOR;
 use crate::types::{FillAnalysis, FillExactInInstruction, FillExactInParams, Side};
 
@@ -527,9 +527,15 @@ pub fn route_mint_positions(disc: &[u8; 8]) -> Option<(usize, usize)> {
 
 pub fn decode_jupiter_rfq_fill(data: &[u8]) -> Option<(FillExactInInstruction, FillAnalysis)> {
     let (steps, in_amount, _) = parse_route_steps(data)?;
-    steps
-        .iter()
-        .find_map(|(side, fill_data, _, _)| try_decode_rfq_fill(side, fill_data, in_amount))
+    steps.iter().find_map(|(side, fill_data, input_idx, _)| {
+        // The route's `in_amount` is denominated in the route's source
+        // token and only flows directly into a step that consumes that
+        // source (input_index == 0). For mid-chain RFQ legs the actual
+        // amount is whatever the upstream step output at runtime, so
+        // there's no honest static value to fill in here.
+        let reliable_in = if *input_idx == 0 { in_amount } else { None };
+        try_decode_rfq_fill(side, fill_data, reliable_in)
+    })
 }
 
 pub fn decode_jupiter_rfq_step_indices(data: &[u8]) -> Option<JupiterRfqStepInfo> {
@@ -801,16 +807,24 @@ fn try_decode_rfq_fill(
     }
 
     if let Some(params) = deser::<FillExactInParams>(fill_data) {
+        if !is_params_plausible(&params) {
+            return None;
+        }
+        // `amount_in_atoms` is 0 when this leg's runtime input isn't
+        // derivable from the static route header (i.e. not the first
+        // leg). The sweep returns zeros in that case but the params
+        // are still surfaced.
         let ix = FillExactInInstruction {
             taker_side: side,
             amount_in_atoms: in_amount.unwrap_or(0),
             params,
         };
-        if let Ok(analysis) = analyze_fill(&ix) {
-            if analysis.levels_consumed > 0 {
-                return Some((ix, analysis));
-            }
+        let analysis = analyze_fill(&ix).ok()?;
+
+        if in_amount.is_some() && analysis.levels_consumed == 0 {
+            return None;
         }
+        return Some((ix, analysis));
     }
 
     None

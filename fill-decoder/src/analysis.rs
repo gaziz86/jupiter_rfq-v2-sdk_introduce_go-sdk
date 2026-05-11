@@ -1,7 +1,34 @@
 //! Off-chain sweep simulation for `fill_exact_in` instructions.
 
 use crate::error::FillDecoderError;
-use crate::types::{FillAnalysis, FillExactInInstruction, Side};
+use crate::types::{FillAnalysis, FillExactInInstruction, FillExactInParams, Side};
+
+/// Heuristic plausibility check on decoded [`FillExactInParams`].
+pub fn is_params_plausible(params: &FillExactInParams) -> bool {
+    params.tick_size_qpb > 0
+        && params.lot_size_base > 0
+        && params.tick_size_qpb <= 1_000_000_000_000
+        && params.lot_size_base <= 1_000_000_000_000
+        && !params.levels.is_empty()
+        && params.levels.len() <= 20
+        && params
+            .levels
+            .iter()
+            .all(|l| l.px_ticks > 0 && l.qty_lots > 0)
+        && {
+            let max_px = params.levels.iter().map(|l| l.px_ticks).max().unwrap();
+            let min_px = params.levels.iter().map(|l| l.px_ticks).min().unwrap();
+            max_px <= min_px.saturating_mul(10) && max_px <= 1_000_000_000_000_000
+        }
+        && (params
+            .levels
+            .windows(2)
+            .all(|w| w[0].px_ticks <= w[1].px_ticks)
+            || params
+                .levels
+                .windows(2)
+                .all(|w| w[0].px_ticks >= w[1].px_ticks))
+}
 
 /// Run the off-chain sweep simulation on a decoded `fill_exact_in` instruction.
 ///

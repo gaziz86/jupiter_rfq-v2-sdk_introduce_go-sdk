@@ -328,9 +328,9 @@ async fn main() {
         if !table_addresses.is_empty() {
             match fetch_lookup_tables(rpc_url, &table_addresses).await {
                 Ok(tables) => fill_decoder::resolve_address_lookups(&mut tx.message, &tables),
-                Err(e) => eprintln!(
-                    "warning: failed to fetch lookup tables, leaving placeholders: {e}"
-                ),
+                Err(e) => {
+                    eprintln!("warning: failed to fetch lookup tables, leaving placeholders: {e}")
+                }
             }
         }
     }
