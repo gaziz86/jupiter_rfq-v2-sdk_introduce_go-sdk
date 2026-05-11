@@ -528,6 +528,11 @@ pub fn route_mint_positions(disc: &[u8; 8]) -> Option<(usize, usize)> {
 pub fn decode_jupiter_rfq_fill(data: &[u8]) -> Option<(FillExactInInstruction, FillAnalysis)> {
     let (steps, in_amount, _) = parse_route_steps(data)?;
     steps.iter().find_map(|(side, fill_data, input_idx, _)| {
+        // The route's `in_amount` is denominated in the route's source
+        // token and only flows directly into a step that consumes that
+        // source (input_index == 0). For mid-chain RFQ legs the actual
+        // amount is whatever the upstream step output at runtime, so
+        // there's no honest static value to fill in here.
         let reliable_in = if *input_idx == 0 { in_amount } else { None };
         try_decode_rfq_fill(side, fill_data, reliable_in)
     })
@@ -815,6 +820,10 @@ fn try_decode_rfq_fill(
             params,
         };
         let analysis = analyze_fill(&ix).ok()?;
+
+        if in_amount.is_some() && analysis.levels_consumed == 0 {
+            return None;
+        }
         return Some((ix, analysis));
     }
 
