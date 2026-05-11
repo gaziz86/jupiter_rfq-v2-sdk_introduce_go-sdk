@@ -11,7 +11,10 @@ pub fn is_params_plausible(params: &FillExactInParams) -> bool {
         && params.lot_size_base <= 1_000_000_000_000
         && !params.levels.is_empty()
         && params.levels.len() <= 20
-        && params.levels.iter().all(|l| l.px_ticks > 0 && l.qty_lots > 0)
+        && params
+            .levels
+            .iter()
+            .all(|l| l.px_ticks > 0 && l.qty_lots > 0)
         && {
             let max_px = params.levels.iter().map(|l| l.px_ticks).max().unwrap();
             let min_px = params.levels.iter().map(|l| l.px_ticks).min().unwrap();
