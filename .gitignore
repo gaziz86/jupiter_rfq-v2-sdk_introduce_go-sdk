@@ -16,3 +16,7 @@ venv/
 # or by `pip install` (see python-sdk/setup.py).
 python-sdk/src/protos/market_maker_pb2.py
 python-sdk/src/protos/market_maker_pb2_grpc.py
+
+# Generated protobuf stubs - produced by go-sdk `./scripts/generate_protos.sh` (see go-sdk/README.md).
+go-sdk/marketmakerpb/market_maker.pb.go
+go-sdk/marketmakerpb/market_maker_grpc.pb.go

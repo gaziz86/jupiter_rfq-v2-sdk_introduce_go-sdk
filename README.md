@@ -1,6 +1,6 @@
 # Jupiter RFQ v2 Market Maker SDK
 
-SDKs for Jupiter's RFQ v2 Market Maker service via gRPC streaming. Available in **Rust** and **Python**.
+SDKs for Jupiter's RFQ v2 Market Maker service via gRPC streaming. Available in **Rust**, **Python**, and **Go**.
 
 ## Features
 
@@ -36,6 +36,20 @@ python examples/production_streaming.py
 ```
 
 **Requirements:** Python 3.8+, grpcio, protobuf, solders
+
+---
+
+### Go SDK
+
+Go SDK with built-in goroutine-based streaming helpers for RFQ v2 quote/swap workflows. See [`go-sdk/README.md`](go-sdk/README.md)
+
+```bash
+cd go-sdk
+go test ./...
+go run ./examples/production_streaming
+```
+
+**Requirements:** Go 1.24+
 
 ## Environment Variables
 
